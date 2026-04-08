@@ -15,6 +15,11 @@ class FlutterWindow : public Win32Window {
   explicit FlutterWindow(const flutter::DartProject& project);
   virtual ~FlutterWindow();
 
+  // Returns the engine instance hosted by this window.
+  flutter::FlutterEngine* GetEngine() {
+    return flutter_controller_ ? flutter_controller_->engine() : nullptr;
+  }
+
  protected:
   // Win32Window:
   bool OnCreate() override;

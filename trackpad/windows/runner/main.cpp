@@ -28,6 +28,12 @@ class InputSimulator {
       HandleScroll(GetDouble(args, "dx"), GetDouble(args, "dy"));
     } else if (type == "zoom") {
       HandleZoom(GetDouble(args, "scale"));
+    } else if (type == "keyDown") {
+      SendKey(static_cast<BYTE>(GetInt(args, "key")), true);
+    } else if (type == "keyUp") {
+      SendKey(static_cast<BYTE>(GetInt(args, "key")), false);
+    } else if (type == "keyTap") {
+      SendKeyCombination({static_cast<BYTE>(GetInt(args, "key"))});
     } else if (type == "lookup" || type == "workspace" || type == "gesture") {
       HandleGestures(type, args);
     }
@@ -73,8 +79,8 @@ class InputSimulator {
   static void HandleZoom(double scale) {
     // Windows equivalent for pinch-to-zoom is Ctrl + Mouse Wheel
     INPUT inputs[3] = {0};
-
     // Ctrl Down
+
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = VK_CONTROL;
 
@@ -95,7 +101,18 @@ class InputSimulator {
     std::string action = GetString(args, "action");
     std::string direction = GetString(args, "direction");
 
-    if (type == "lookup" || action == "search") {
+    if (action == "switchApp") {
+      // Use VK_LMENU (Left Alt) for system compatibility
+      if (direction == "left") {
+        SendKeyCombination({VK_LMENU, VK_SHIFT, VK_TAB}); // Prev App
+      } else if (direction == "up") {
+        SendKeyCombination({VK_LMENU, VK_UP});            // Grid Up
+      } else if (direction == "down") {
+        SendKeyCombination({VK_LMENU, VK_DOWN});          // Grid Down
+      } else {
+        SendKeyCombination({VK_LMENU, VK_TAB});           // Next App
+      }
+    } else if (type == "lookup" || action == "search") {
       SendKeyCombination({VK_LWIN, 'S'}); // Windows Search
     } else if (type == "workspace" || action == "taskView") {
       if (direction == "up" || direction == "down" || action == "taskView") {
@@ -109,12 +126,6 @@ class InputSimulator {
       SendKeyCombination({VK_LWIN, 'D'}); // Toggle Desktop
     } else if (action == "actionCenter") {
       SendKeyCombination({VK_LWIN, 'A'}); // Quick Settings / Action Center
-    } else if (action == "switchApp") {
-      if (direction == "left") {
-        SendKeyCombination({VK_MENU, VK_SHIFT, VK_TAB}); // Alt+Shift+Tab
-      } else {
-        SendKeyCombination({VK_MENU, VK_TAB}); // Alt+Tab
-      }
     }
   }
 
@@ -159,23 +170,59 @@ class InputSimulator {
     SendInput(1, &input, sizeof(INPUT));
   }
 
+  static void SendKey(BYTE key, bool down) {
+    INPUT input = {0};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = key;
+    input.ki.wScan = static_cast<WORD>(MapVirtualKey(key, MAPVK_VK_TO_VSC));
+    input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+
+    if (key == VK_LWIN || key == VK_RWIN || key == VK_LEFT || key == VK_RIGHT ||
+        key == VK_UP || key == VK_DOWN || key == VK_PRIOR || key == VK_NEXT ||
+        key == VK_END || key == VK_HOME || key == VK_INSERT || key == VK_DELETE ||
+        key == VK_RMENU || key == VK_RCONTROL) {
+      input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+
+    SendInput(1, &input, sizeof(INPUT));
+  }
+
   static void SendKeyCombination(const std::vector<BYTE>& keys) {
     std::vector<INPUT> inputs;
-    // Press keys
+
+    // Press keys in order
     for (BYTE key : keys) {
       INPUT input = {0};
       input.type = INPUT_KEYBOARD;
       input.ki.wVk = key;
+      input.ki.wScan = static_cast<WORD>(MapVirtualKey(key, MAPVK_VK_TO_VSC));
+      input.ki.dwFlags = 0;
+
+      // Extended key flag for arrows, Win key, etc.
+      if (key == VK_LWIN || key == VK_RWIN || key == VK_LEFT || key == VK_RIGHT ||
+          key == VK_UP || key == VK_DOWN || key == VK_PRIOR || key == VK_NEXT ||
+          key == VK_END || key == VK_HOME || key == VK_INSERT || key == VK_DELETE) {
+        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+      }
       inputs.push_back(input);
     }
-    // Release keys in reverse
+
+    // Release keys in reverse order
     for (auto it = keys.rbegin(); it != keys.rend(); ++it) {
       INPUT input = {0};
       input.type = INPUT_KEYBOARD;
       input.ki.wVk = *it;
+      input.ki.wScan = static_cast<WORD>(MapVirtualKey(*it, MAPVK_VK_TO_VSC));
       input.ki.dwFlags = KEYEVENTF_KEYUP;
+
+      if (*it == VK_LWIN || *it == VK_RWIN || *it == VK_LEFT || *it == VK_RIGHT ||
+          *it == VK_UP || *it == VK_DOWN || *it == VK_PRIOR || *it == VK_NEXT ||
+          *it == VK_END || *it == VK_HOME || *it == VK_INSERT || *it == VK_DELETE) {
+        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+      }
       inputs.push_back(input);
     }
+
     SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
   }
 };
@@ -203,8 +250,9 @@ void RegisterMouseSimulation(flutter::FlutterEngine* engine) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
                      _In_ PWSTR lpCmdLine, _In_ int nShowCmd) {
-  if (!Utils::GetSystemColors()) {
-    return EXIT_FAILURE;
+  // Attach to console when present (e.g., 'flutter run') or create a new console when not.
+  if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
+    CreateAndAttachConsole();
   }
 
   if (::HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0) == 0) {
@@ -215,7 +263,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
   flutter::DartProject project(L"data");
 
-  std::vector<std::string> command_line_arguments;
+  std::vector<std::string> command_line_arguments = GetCommandLineArguments();
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
@@ -226,7 +274,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
   }
   window.SetQuitOnClose(true);
 
-  RegisterMouseSimulation(window.GetRenderSurface()->GetEngine());
+  if (window.GetEngine()) {
+    RegisterMouseSimulation(window.GetEngine());
+  }
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {

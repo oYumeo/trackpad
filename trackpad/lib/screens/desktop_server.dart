@@ -104,16 +104,35 @@ class _DesktopServerState extends State<DesktopServer> {
 
   Future<void> _setupAndroidUsb() async {
     try {
-      // Maps Device:50010 -> Mac:50010
-      final result = await Process.run('adb', ['reverse', 'tcp:50010', 'tcp:50010']);
+      String adbPath = 'adb';
+      
+      // Try to find ADB in common Windows locations if the simple command fails
+      if (Platform.isWindows) {
+        final homeDir = Platform.environment['USERPROFILE'];
+        if (homeDir != null) {
+          final commonAdbPath = "$homeDir\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe";
+          if (await File(commonAdbPath).exists()) {
+            adbPath = commonAdbPath;
+          }
+        }
+      }
+
+      _log("Running ADB reverse...");
+      // Maps Device:50010 -> Mac/PC:50010
+      final result = await Process.run(adbPath, ['reverse', 'tcp:50010', 'tcp:50010']);
+      
       if (result.exitCode == 0) {
         setState(() => _androidUsbActive = true);
         _log("Android USB: Port 50010 reversed");
       } else {
-        _log("ADB Error: ${result.stderr}");
+        _log("ADB Error (Exit ${result.exitCode}): ${result.stderr}");
+        if (result.stderr.toString().contains("not found")) {
+          _log("Tip: Ensure ADB is in PATH or Android SDK is installed.");
+        }
       }
     } catch (e) {
-      _log("ADB Error: $e");
+      _log("ADB Process Error: $e");
+      _log("Make sure Android SDK Platform-Tools are installed.");
     }
   }
 

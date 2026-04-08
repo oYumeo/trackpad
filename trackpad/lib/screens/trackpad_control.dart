@@ -35,7 +35,11 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
   Offset _lastFocalPoint = Offset.zero;
   bool _isDragging = false;
   double _totalScrollDistance = 0.0;
-  double _totalDragDistance = 0.0;
+  double _totalDragXDistance = 0.0;
+  double _totalDragYDistance = 0.0;
+  // double _totalDragDistance = 0.0;
+  bool _isAltTabActive = false;
+  bool _isThreeFingerActionTriggered = false;
 
   Offset _tapPosition = Offset.zero;
   int _lastTapTime = 0;
@@ -188,10 +192,10 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
       _send({'type': 'click', 'button': 'right', 'clickCount': _clickCount});
       _showLabel(_clickCount > 1 ? 'Right Double Click' : 'Right Click');
     } else if (_maxPointers == 3) {
-      if (_totalDragDistance > 40) return;
-      HapticFeedback.heavyImpact();
-      _send({'type': 'lookup'});
-      _showLabel('Look Up');
+      // if (_totalDragDistance > 40) return;
+      // HapticFeedback.heavyImpact();
+      // _send({'type': 'lookup'});
+      // _showLabel('Look Up');
     } else if (_maxPointers == 1) {
       HapticFeedback.lightImpact();
       _send({'type': 'click', 'button': 'left', 'clickCount': _clickCount});
@@ -384,16 +388,27 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         _addRipple(e.localPosition);
         final now = DateTime.now().millisecondsSinceEpoch;
         setState(() {
+          _isThreeFingerActionTriggered = false;
           if (_pointerPositions.isEmpty) {
             _maxPointers = 0;
             _isDragging = false;
             _isHoldDragging = false;
             _totalScrollDistance = 0.0;
-            _totalDragDistance = 0.0;
+            _totalDragXDistance = 0.0;
+            _totalDragYDistance = 0.0;
           }
           _pointerPositions[e.pointer] = e.localPosition;
           _pointerDownTimes[e.pointer] = now;
           if (_pointerPositions.length > _maxPointers) _maxPointers = _pointerPositions.length;
+
+          if (_pointerPositions.length == 4 && !_isAltTabActive) {
+            _isAltTabActive = true;
+            _send({'type': 'keyDown', 'key': 0x12}); // Alt Down
+            _send({'type': 'keyTap', 'key': 0x09});  // Tab Tap
+            _showLabel('App Switcher');
+            HapticFeedback.heavyImpact();
+          }
+
           if (_pointerPositions.length > 1) {
             _longPressTimer?.cancel();
             if (_isHoldDragging) {
@@ -435,6 +450,10 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         final now = DateTime.now().millisecondsSinceEpoch;
         final duration = now - (_pointerDownTimes[e.pointer] ?? now);
         setState(() {
+          if (_isAltTabActive && _pointerPositions.length < 4) {
+            _send({'type': 'keyUp', 'key': 0x12}); // Alt Up
+            _isAltTabActive = false;
+          }
           _pointerPositions.remove(e.pointer);
           _pointerDownTimes.remove(e.pointer);
           if (_pointerPositions.isEmpty) {
@@ -454,6 +473,10 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         if (!_pointerPositions.containsKey(e.pointer)) return;
         _longPressTimer?.cancel();
         setState(() {
+          if (_isAltTabActive && _pointerPositions.length < 4) {
+            _send({'type': 'keyUp', 'key': 0x12}); // Alt Up
+            _isAltTabActive = false;
+          }
           _pointerPositions.remove(e.pointer);
           _pointerDownTimes.remove(e.pointer);
           if (_pointerPositions.isEmpty) {
@@ -470,7 +493,8 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
           _isDragging = false;
           _scrollVelocity = Offset.zero;
           _totalScrollDistance = 0.0;
-          _totalDragDistance = 0.0;
+          _totalDragYDistance = 0.0;
+          _totalDragXDistance = 0.0;
           _inertiaTimer?.cancel();
         },
         onScaleUpdate: (details) {
@@ -497,30 +521,58 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
 
             // }
           } else if (pCount == 3) {
-            _totalDragDistance += delta.distance;
+            _totalDragYDistance += delta.dy;
+            _totalDragXDistance += delta.dx;
+            
+            // Horizontal: Switch Desktop
+            if (_totalDragXDistance.abs() > 50) {
+              _send({
+                'type': 'workspace',
+                'action': 'switch',
+                'direction': _totalDragXDistance > 0 ? 'right' : 'left'
+              });
+              HapticFeedback.mediumImpact();
+              _totalDragXDistance = 0;
+            }
+            
+            // Vertical: Mission Control (Task View) - Trigger ONLY ONCE per swipe
+            if (_totalDragYDistance.abs() > 80 && !_isThreeFingerActionTriggered) {
+              _send({
+                'type': 'workspace',
+                'action': 'switch',
+                'direction': _totalDragYDistance > 0 ? 'down' : 'up'
+              });
+              HapticFeedback.heavyImpact();
+              _isThreeFingerActionTriggered = true;
+              _totalDragYDistance = 0;
+            }
+          } else if (pCount == 4) {
+            _totalDragXDistance += delta.dx;
+            _totalDragYDistance += delta.dy;
+
+            // Horizontal Switching (Next/Prev App)
+            if (_totalDragXDistance.abs() > 30) {
+              _send({
+                'type': 'keyTap',
+                'key': _totalDragXDistance > 0 ? 0x27 : 0x25, // Right or Left Arrow
+              });
+              HapticFeedback.selectionClick();
+              _totalDragXDistance = 0;
+            }
+
+            // Vertical Switching (Navigate Grid)
+            if (_totalDragYDistance.abs() > 30) {
+              _send({
+                'type': 'keyTap',
+                'key': _totalDragYDistance > 0 ? 0x28 : 0x26, // Down or Up Arrow
+              });
+              HapticFeedback.selectionClick();
+              _totalDragYDistance = 0;
+            }
           }
         },
         onScaleEnd: (details) {
           if (_pointerPositions.isEmpty && _maxPointers == 2 && _isDragging) _startInertia();
-          if (_isDragging) {
-            final vx = details.velocity.pixelsPerSecond.dx;
-            final vy = details.velocity.pixelsPerSecond.dy;
-            if (_maxPointers == 3 && _totalDragDistance > 40) {
-              if (vx > 400) {
-                _send({'type': 'workspace', 'direction': 'left'});
-                _showLabel('← Space');
-              } else if (vx < -400) {
-                _send({'type': 'workspace', 'direction': 'right'});
-                _showLabel('Space →');
-              } else if (vy < -400) {
-                _send({'type': 'workspace', 'direction': 'up'});
-                _showLabel('Mission Control');
-              } else if (vy > 400) {
-                _send({'type': 'workspace', 'direction': 'down'});
-                _showLabel('Close Mission Control');
-              }
-            }
-          }
         },
         child: Container(
           margin: const EdgeInsets.fromLTRB(20, 44, 10, 20),
