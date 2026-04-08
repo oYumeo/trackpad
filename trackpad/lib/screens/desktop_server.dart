@@ -137,14 +137,45 @@ class _DesktopServerState extends State<DesktopServer> {
   }
 
   Future<void> _setupIosUsb() async {
-    if (!Platform.isMacOS) return;
+    String iproxyPath = 'iproxy';
     
-    _log("iOS USB: Starting iproxy...");
+    if (Platform.isWindows) {
+      iproxyPath = 'iproxy.exe';
+      // Check common locations on Windows
+      final possiblePaths = [
+        'tools/iproxy.exe',
+        'C:\\libimobiledevice\\iproxy.exe',
+        'C:\\libimobiledevice-win32\\iproxy.exe',
+      ];
+      for (var path in possiblePaths) {
+        if (await File(path).exists()) {
+          iproxyPath = path;
+          break;
+        }
+      }
+    } else if (Platform.isMacOS) {
+      iproxyPath = 'iproxy';
+      final possiblePaths = [
+        '/opt/homebrew/bin/iproxy',
+        '/usr/local/bin/iproxy',
+      ];
+      for (var path in possiblePaths) {
+        if (await File(path).exists()) {
+          iproxyPath = path;
+          break;
+        }
+      }
+    } else {
+      _log("iOS USB not supported on this platform");
+      return;
+    }
+    
+    _log("iOS USB: Starting $iproxyPath...");
     try {
       _iproxyProcess?.kill();
       
-      // Mac Port 50011 -> iPhone Port 50010
-      _iproxyProcess = await Process.start('/opt/homebrew/bin/iproxy', ['50011', '50010']);
+      // Port 50011 (PC) -> Port 50010 (iPhone)
+      _iproxyProcess = await Process.start(iproxyPath, ['50011', '50010']);
       
       setState(() => _iosUsbActive = true);
       await Future.delayed(const Duration(seconds: 2));
@@ -156,6 +187,9 @@ class _DesktopServerState extends State<DesktopServer> {
       
     } catch (e) {
       _log("iOS USB Failed: $e");
+      if (Platform.isWindows) {
+        _log("Tip: Ensure iproxy.exe is in PATH or C:\\libimobiledevice");
+      }
     }
   }
 

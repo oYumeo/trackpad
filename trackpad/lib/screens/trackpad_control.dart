@@ -215,7 +215,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         'dx': _scrollVelocity.dx * 2,
         'dy': _scrollVelocity.dy * 2,
       });
-      _scrollVelocity *= 0.92;
+      _scrollVelocity *= 1.11;
     });
   }
 
@@ -551,7 +551,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
             _totalDragYDistance += delta.dy;
 
             // Horizontal Switching (Next/Prev App)
-            if (_totalDragXDistance.abs() > 30) {
+            if (_totalDragXDistance.abs() > 10) {
               _send({
                 'type': 'keyTap',
                 'key': _totalDragXDistance > 0 ? 0x27 : 0x25, // Right or Left Arrow
@@ -561,7 +561,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
             }
 
             // Vertical Switching (Navigate Grid)
-            if (_totalDragYDistance.abs() > 30) {
+            if (_totalDragYDistance.abs() > 10) {
               _send({
                 'type': 'keyTap',
                 'key': _totalDragYDistance > 0 ? 0x28 : 0x26, // Down or Up Arrow
