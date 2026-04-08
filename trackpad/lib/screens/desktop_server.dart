@@ -31,15 +31,26 @@ class _DesktopServerState extends State<DesktopServer> {
     _startServer();
   }
 
+  List<String> _allIps = [];
+
   void _fetchIp() async {
+    List<String> ips = [];
     for (var interface in await NetworkInterface.list()) {
       for (var addr in interface.addresses) {
         if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-          setState(() => _myIp = addr.address);
-          return;
+          // Prioritize 192.168.x.x or 10.x.x.x addresses (typical WiFi)
+          if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.')) {
+            ips.insert(0, addr.address);
+          } else {
+            ips.add(addr.address);
+          }
         }
       }
     }
+    setState(() {
+      _allIps = ips;
+      _myIp = ips.isNotEmpty ? ips.join("\n") : "No IP Found";
+    });
   }
 
   void _startServer() async {
@@ -279,7 +290,7 @@ class _DesktopServerState extends State<DesktopServer> {
 
   Widget _buildStatusCard(String title, String value, Color color) {
     return Container(
-      width: 140,
+      width: 160,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: color.withOpacity(0.05),
@@ -290,7 +301,7 @@ class _DesktopServerState extends State<DesktopServer> {
         children: [
           Text(title, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Text(value, style: const TextStyle(fontSize: 14, fontFamily: 'Courier')),
+          Text(value, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontFamily: 'Courier')),
         ],
       ),
     );
