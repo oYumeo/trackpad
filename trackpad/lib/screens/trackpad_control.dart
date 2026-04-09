@@ -10,7 +10,14 @@ import '../widgets/grid_painter.dart';
 class TrackpadControl extends StatefulWidget {
   final String ip;
   final bool isUsbMode;
-  const TrackpadControl({super.key, required this.ip, this.isUsbMode = false});
+  final bool isP2PMode; // New parameter
+  
+  const TrackpadControl({
+    super.key, 
+    required this.ip, 
+    this.isUsbMode = false,
+    this.isP2PMode = false,
+  });
 
   @override
   State<TrackpadControl> createState() => _TrackpadControlState();
@@ -18,7 +25,7 @@ class TrackpadControl extends StatefulWidget {
 
 class _TrackpadControlState extends State<TrackpadControl> with TickerProviderStateMixin {
   RawDatagramSocket? _udpSender;
-  Socket? _tcpSocket; // This will be either the client or the connected server socket
+  Socket? _tcpSocket;
   ServerSocket? _iosUsbServer;
   bool _connected = false;
   bool _connecting = true;
@@ -34,10 +41,10 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
 
   Offset _lastFocalPoint = Offset.zero;
   bool _isDragging = false;
+  bool _wasScrolling = false;
   double _totalScrollDistance = 0.0;
   double _totalDragXDistance = 0.0;
   double _totalDragYDistance = 0.0;
-  // double _totalDragDistance = 0.0;
   bool _isAltTabActive = false;
   bool _isThreeFingerActionTriggered = false;
 
@@ -82,13 +89,17 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
     });
 
     try {
-      if (widget.isUsbMode) {
+      if (widget.isP2PMode) {
+        // ADB P2P MODE: No connection needed, just start sending logs
+        setState(() {
+          _connected = true;
+          _connecting = false;
+        });
+        _showLabel("ADB P2P Mode Active");
+      } else if (widget.isUsbMode) {
         if (Platform.isIOS) {
-          // iOS USB MODE: The iPhone acts as the SERVER on port 50010.
-          // iproxy on Mac (port 50011) will connect to this server.
           _iosUsbServer = await ServerSocket.bind(InternetAddress.anyIPv4, 50010);
           _showLabel("iOS USB: Waiting for Mac...");
-          
           _iosUsbServer!.listen((Socket client) {
             setState(() {
               _tcpSocket = client;
@@ -97,43 +108,28 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
             });
             _showLabel("Connected to Mac via USB");
             HapticFeedback.heavyImpact();
-            
-            client.done.then((_) {
-              if (mounted) setState(() => _connected = false);
-            });
+            client.done.then((_) { if (mounted) setState(() => _connected = false); });
           });
         } else {
-          // ANDROID USB MODE: The Phone acts as a CLIENT (connects to Mac via adb reverse)
-          // Mac runs 'adb reverse tcp:50010 tcp:50010'
           final targetIp = (widget.ip == "localhost" || widget.ip == "127.0.0.1") ? "127.0.0.1" : widget.ip;
           _tcpSocket = await Socket.connect(targetIp, 50010, timeout: const Duration(seconds: 5));
           _tcpSocket!.setOption(SocketOption.tcpNoDelay, true);
-          
-          setState(() {
-            _connected = true;
-            _connecting = false;
-          });
+          setState(() { _connected = true; _connecting = false; });
         }
       } else {
-        // WIFI MODE: UDP
         _targetAddress = InternetAddress(widget.ip);
         _udpSender = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-        setState(() {
-          _connected = true;
-          _connecting = false;
-        });
+        setState(() { _connected = true; _connecting = false; });
       }
 
-      if (_connected) {
+      if (_connected && !widget.isP2PMode) {
         HapticFeedback.mediumImpact();
         _showLabel(widget.isUsbMode ? "USB (TCP) Active" : "WiFi (UDP) Active");
       }
     } catch (e) {
       if (mounted) {
         setState(() => _connecting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Connection failed: $e")),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Connection failed: $e")));
         Navigator.pop(context);
       }
     }
@@ -142,12 +138,15 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
   void _send(Map<String, dynamic> data) {
     if (!_connected) return;
 
-    final message = jsonEncode(data) + "\n";
+    final message = jsonEncode(data);
 
-    if (widget.isUsbMode && _tcpSocket != null) {
-      _tcpSocket!.write(message);
+    if (widget.isP2PMode) {
+      // Send via Logcat for P2P Mode
+      debugPrint("TP:$message");
+    } else if (widget.isUsbMode && _tcpSocket != null) {
+      _tcpSocket!.write(message + "\n");
     } else if (_udpSender != null && _targetAddress != null) {
-      final bytes = utf8.encode(message);
+      final bytes = utf8.encode(message + "\n");
       _udpSender!.send(bytes, _targetAddress!, 50005);
     }
   }
@@ -187,15 +186,22 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
     final isBottomRight = _tapPosition.dx > size.width * 0.75 && _tapPosition.dy > size.height * 0.75;
 
     if (_maxPointers == 2 || (_maxPointers == 1 && isBottomRight)) {
-      if (_maxPointers == 2 && _totalScrollDistance > 40) return;
+      if (_maxPointers == 2) {
+        // STRICT right-click detection
+        final isTap = _totalScrollDistance < 10;   // almost no movement
+        final isQuick = (DateTime.now().millisecondsSinceEpoch - _lastTapTime) < 200;
+
+        if (isTap && isQuick && !_wasScrolling) {
+          HapticFeedback.mediumImpact();
+          _send({'type': 'click', 'button': 'right', 'clickCount': _clickCount});
+          _showLabel(_clickCount > 1 ? 'Right Double Click' : 'Right Click');
+        }
+
+        return; // prevent fallback to left click
+      }
       HapticFeedback.mediumImpact();
       _send({'type': 'click', 'button': 'right', 'clickCount': _clickCount});
       _showLabel(_clickCount > 1 ? 'Right Double Click' : 'Right Click');
-    } else if (_maxPointers == 3) {
-      // if (_totalDragDistance > 40) return;
-      // HapticFeedback.heavyImpact();
-      // _send({'type': 'lookup'});
-      // _showLabel('Look Up');
     } else if (_maxPointers == 1) {
       HapticFeedback.lightImpact();
       _send({'type': 'click', 'button': 'left', 'clickCount': _clickCount});
@@ -212,10 +218,10 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
       }
       _send({
         'type': 'scroll',
-        'dx': _scrollVelocity.dx * 2,
-        'dy': _scrollVelocity.dy * 2,
+        'dx': _scrollVelocity.dx * 10,
+        'dy': _scrollVelocity.dy * 10,
       });
-      _scrollVelocity *= 1.11;
+      _scrollVelocity *= 0.92;
     });
   }
 
@@ -266,48 +272,37 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
   }
 
   Widget _buildStatusBar() {
-    final statusColor = _connecting 
+    final statusColor = widget.isP2PMode 
         ? Colors.orange 
-        : _connected 
-            ? (widget.isUsbMode ? Colors.green : Colors.blue) 
-            : Colors.red;
+        : (_connecting 
+            ? Colors.orange 
+            : _connected 
+                ? (widget.isUsbMode ? Colors.green : Colors.blue) 
+                : Colors.red);
 
     return Positioned(
-      top: 0,
-      left: 0,
-      right: 160,
+      top: 0, left: 0, right: 160,
       child: Container(
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        height: 44, padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Row(
           children: [
             AnimatedContainer(
               duration: const Duration(milliseconds: 300),
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: statusColor,
-                boxShadow: [
-                  BoxShadow(
-                    color: statusColor.withOpacity(0.6),
-                    blurRadius: 6,
-                    spreadRadius: 1,
-                  )
-                ],
-              ),
+              width: 8, height: 8,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor, boxShadow: [BoxShadow(color: statusColor.withOpacity(0.6), blurRadius: 6, spreadRadius: 1)]),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                _connecting
+                widget.isP2PMode 
+                  ? 'ADB P2P (No-TCP) - Active' 
+                  : (_connecting
                     ? (Platform.isIOS && widget.isUsbMode ? 'Waiting for Mac USB...' : 'Connecting...')
                     : _connected
                         ? '${widget.isUsbMode ? "Direct USB" : "WiFi"}: ${widget.ip}'
-                        : 'Disconnected — retrying',
+                        : 'Disconnected'),
                 style: TextStyle(fontSize: 12, color: _connected ? Colors.white54 : Colors.red.shade300),
                 overflow: TextOverflow.ellipsis,
-                maxLines: 1,
               ),
             ),
             const SizedBox(width: 8),
@@ -343,13 +338,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
               ),
             ),
             const SizedBox(width: 8),
-            GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(
-                padding: const EdgeInsets.all(6),
-                child: const Icon(Icons.close, size: 16, color: Colors.white38),
-              ),
-            ),
+            GestureDetector(onTap: () => Navigator.pop(context), child: Container(padding: const EdgeInsets.all(6), child: const Icon(Icons.close, size: 16, color: Colors.white38))),
           ],
         ),
       ),
@@ -358,20 +347,14 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
 
   Widget _buildGestureLabel() {
     return Positioned(
-      bottom: 40,
-      left: 0,
-      right: 160,
+      bottom: 40, left: 0, right: 160,
       child: Center(
         child: AnimatedOpacity(
           opacity: _gestureLabel.isNotEmpty ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 200),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.08),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withOpacity(0.1)),
-            ),
+            decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.1))),
             child: Text(_gestureLabel, style: const TextStyle(color: Colors.white60, fontSize: 12, letterSpacing: 1)),
           ),
         ),
@@ -390,12 +373,8 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         setState(() {
           _isThreeFingerActionTriggered = false;
           if (_pointerPositions.isEmpty) {
-            _maxPointers = 0;
-            _isDragging = false;
-            _isHoldDragging = false;
-            _totalScrollDistance = 0.0;
-            _totalDragXDistance = 0.0;
-            _totalDragYDistance = 0.0;
+            _maxPointers = 0; _isDragging = false; _isHoldDragging = false;
+            _totalScrollDistance = 0.0; _totalDragXDistance = 0.0; _totalDragYDistance = 0.0;
           }
           _pointerPositions[e.pointer] = e.localPosition;
           _pointerDownTimes[e.pointer] = now;
@@ -403,17 +382,14 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
 
           if (_pointerPositions.length == 4 && !_isAltTabActive) {
             _isAltTabActive = true;
-            _send({'type': 'keyDown', 'key': 0x12}); // Alt Down
-            _send({'type': 'keyTap', 'key': 0x09});  // Tab Tap
-            _showLabel('App Switcher');
-            HapticFeedback.heavyImpact();
+            _send({'type': 'keyDown', 'key': 0x12}); _send({'type': 'keyTap', 'key': 0x09});
+            _showLabel('App Switcher'); HapticFeedback.heavyImpact();
           }
 
           if (_pointerPositions.length > 1) {
             _longPressTimer?.cancel();
             if (_isHoldDragging) {
-              _send({'type': 'mouseUp', 'button': 'left'});
-              _isHoldDragging = false;
+              _send({'type': 'mouseUp', 'button': 'left'}); _isHoldDragging = false;
               _showLabel('Drag Released');
             }
           }
@@ -424,8 +400,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
                 setState(() {
                   _isHoldDragging = true;
                   _send({'type': 'mouseDown', 'button': 'left'});
-                  HapticFeedback.heavyImpact();
-                  _showLabel('Hold Drag');
+                  HapticFeedback.heavyImpact(); _showLabel('Hold Drag');
                 });
               }
             });
@@ -433,8 +408,7 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
           if (now - _lastTapTime < 250 && _pointerPositions.length == 1) {
             _isDoubleTapDragging = true;
             _send({'type': 'mouseDown', 'button': 'left', 'clickCount': 2});
-            HapticFeedback.heavyImpact();
-            _showLabel('Double Tap Drag');
+            HapticFeedback.heavyImpact(); _showLabel('Double Tap Drag');
           }
           _lastTapTime = now;
         });
@@ -451,18 +425,14 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         final duration = now - (_pointerDownTimes[e.pointer] ?? now);
         setState(() {
           if (_isAltTabActive && _pointerPositions.length < 4) {
-            _send({'type': 'keyUp', 'key': 0x12}); // Alt Up
-            _isAltTabActive = false;
+            _send({'type': 'keyUp', 'key': 0x12}); _isAltTabActive = false;
           }
-          _pointerPositions.remove(e.pointer);
-          _pointerDownTimes.remove(e.pointer);
+          _pointerPositions.remove(e.pointer); _pointerDownTimes.remove(e.pointer);
           if (_pointerPositions.isEmpty) {
             if (_isHoldDragging) {
-              _send({'type': 'mouseUp', 'button': 'left'});
-              _isHoldDragging = false;
+              _send({'type': 'mouseUp', 'button': 'left'}); _isHoldDragging = false;
             } else if (_isDoubleTapDragging) {
-              _send({'type': 'mouseUp', 'button': 'left', 'clickCount': 2});
-              _isDoubleTapDragging = false;
+              _send({'type': 'mouseUp', 'button': 'left', 'clickCount': 2}); _isDoubleTapDragging = false;
             } else if (!_isDragging && !_selectionMode && _maxPointers <= 2 && duration < 300) {
               _handleTap(surfaceSize);
             }
@@ -474,29 +444,15 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
         _longPressTimer?.cancel();
         setState(() {
           if (_isAltTabActive && _pointerPositions.length < 4) {
-            _send({'type': 'keyUp', 'key': 0x12}); // Alt Up
-            _isAltTabActive = false;
+            _send({'type': 'keyUp', 'key': 0x12}); _isAltTabActive = false;
           }
-          _pointerPositions.remove(e.pointer);
-          _pointerDownTimes.remove(e.pointer);
-          if (_pointerPositions.isEmpty) {
-            _maxPointers = 0;
-            _isDragging = false;
-            _isHoldDragging = false;
-          }
+          _pointerPositions.remove(e.pointer); _pointerDownTimes.remove(e.pointer);
+          if (_pointerPositions.isEmpty) { _maxPointers = 0; _isDragging = false; _isHoldDragging = false; }
         });
       },
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onScaleStart: (details) {
-          _lastFocalPoint = details.focalPoint;
-          _isDragging = false;
-          _scrollVelocity = Offset.zero;
-          _totalScrollDistance = 0.0;
-          _totalDragYDistance = 0.0;
-          _totalDragXDistance = 0.0;
-          _inertiaTimer?.cancel();
-        },
+        onScaleStart: (details) { _lastFocalPoint = details.focalPoint; _isDragging = false; _scrollVelocity = Offset.zero; _totalScrollDistance = 0.0; _totalDragYDistance = 0.0; _totalDragXDistance = 0.0; _inertiaTimer?.cancel(); },
         onScaleUpdate: (details) {
           final delta = details.focalPoint - _lastFocalPoint;
           _lastFocalPoint = details.focalPoint;
@@ -507,128 +463,38 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
             final type = (_selectionMode || _isDoubleTapDragging || _isHoldDragging) ? 'drag' : 'move';
             _send({'type': type, 'dx': delta.dx * _sensitivity, 'dy': delta.dy * _sensitivity, if (_isDoubleTapDragging) 'clickCount': 2});
           } else if (pCount == 2) {
-            // if (details.scale != 1.2) {
-            //   _send({'type': 'zoom', 'scale': details.scale - 0.2});
-            //   _showLabel(details.scale > 1.0 ? 'Zoom In' : 'Zoom Out');
-            // } else {
-              _totalScrollDistance += delta.distance;
+            _totalScrollDistance += delta.distance;
+            _wasScrolling = true;
               _scrollVelocity = delta;
-              _send({
-                'type': 'scroll',
-                'dx': delta.dx * -2,
-                'dy': delta.dy * -2,
-              });
-
-            // }
+              _send({'type': 'scroll', 'dx': delta.dx * -2, 'dy': delta.dy * -2});
           } else if (pCount == 3) {
-            _totalDragYDistance += delta.dy;
-            _totalDragXDistance += delta.dx;
-            
-            // Horizontal: Switch Desktop
+            _totalDragYDistance += delta.dy; _totalDragXDistance += delta.dx;
             if (_totalDragXDistance.abs() > 50) {
-              _send({
-                'type': 'workspace',
-                'action': 'switch',
-                'direction': _totalDragXDistance > 0 ? 'right' : 'left'
-              });
-              HapticFeedback.mediumImpact();
-              _totalDragXDistance = 0;
+              _send({'type': 'workspace', 'action': 'switch', 'direction': _totalDragXDistance > 0 ? 'right' : 'left'});
+              HapticFeedback.mediumImpact(); _totalDragXDistance = 0;
             }
-            
-            // Vertical: Mission Control (Task View) - Trigger ONLY ONCE per swipe
             if (_totalDragYDistance.abs() > 80 && !_isThreeFingerActionTriggered) {
-              _send({
-                'type': 'workspace',
-                'action': 'switch',
-                'direction': _totalDragYDistance > 0 ? 'down' : 'up'
-              });
-              HapticFeedback.heavyImpact();
-              _isThreeFingerActionTriggered = true;
-              _totalDragYDistance = 0;
+              _send({'type': 'workspace', 'action': 'switch', 'direction': _totalDragYDistance > 0 ? 'down' : 'up'});
+              HapticFeedback.heavyImpact(); _isThreeFingerActionTriggered = true; _totalDragYDistance = 0;
             }
           } else if (pCount == 4) {
-            _totalDragXDistance += delta.dx;
-            _totalDragYDistance += delta.dy;
-
-            // Horizontal Switching (Next/Prev App)
-            if (_totalDragXDistance.abs() > 10) {
-              _send({
-                'type': 'keyTap',
-                'key': _totalDragXDistance > 0 ? 0x27 : 0x25, // Right or Left Arrow
-              });
-              HapticFeedback.selectionClick();
-              _totalDragXDistance = 0;
-            }
-
-            // Vertical Switching (Navigate Grid)
-            if (_totalDragYDistance.abs() > 10) {
-              _send({
-                'type': 'keyTap',
-                'key': _totalDragYDistance > 0 ? 0x28 : 0x26, // Down or Up Arrow
-              });
-              HapticFeedback.selectionClick();
-              _totalDragYDistance = 0;
-            }
+            _totalDragXDistance += delta.dx; _totalDragYDistance += delta.dy;
+            if (_totalDragXDistance.abs() > 10) { _send({'type': 'keyTap', 'key': _totalDragXDistance > 0 ? 0x27 : 0x25}); HapticFeedback.selectionClick(); _totalDragXDistance = 0; }
+            if (_totalDragYDistance.abs() > 10) { _send({'type': 'keyTap', 'key': _totalDragYDistance > 0 ? 0x28 : 0x26}); HapticFeedback.selectionClick(); _totalDragYDistance = 0; }
           }
         },
-        onScaleEnd: (details) {
-          if (_pointerPositions.isEmpty && _maxPointers == 2 && _isDragging) _startInertia();
-        },
+        onScaleEnd: (details) { if (_pointerPositions.isEmpty && _maxPointers == 2 && _isDragging) _startInertia(); },
         child: Container(
           margin: const EdgeInsets.fromLTRB(20, 44, 10, 20),
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(30),
-            border: Border.all(
-              color: _selectionMode ? Colors.blue : (_isDoubleTapDragging || _isHoldDragging) ? Colors.blue.withOpacity(0.7) : Colors.blue.withOpacity(0.18),
-              width: _selectionMode ? 2 : 1.5,
-            ),
-          ),
+          decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(30), border: Border.all(color: _selectionMode ? Colors.blue : (_isDoubleTapDragging || _isHoldDragging) ? Colors.blue.withOpacity(0.7) : Colors.blue.withOpacity(0.18), width: _selectionMode ? 2 : 1.5)),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(28.5),
             child: Stack(
               children: [
                 CustomPaint(painter: GridPainter(), size: Size.infinite),
                 ..._ripples.map((r) => Positioned(left: r.position.dx - 120, top: r.position.dy - 120, child: RippleWidget(effect: r))),
-                ..._pointerPositions.values.map((pos) => Positioned(
-                  left: pos.dx - 80,
-                  top: pos.dy - 80,
-                  child: Container(
-                    width: 160,
-                    height: 160,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(colors: [Colors.blue.withOpacity(0.18), Colors.blue.withOpacity(0.0)]),
-                    ),
-                  ),
-                )),
-                Center(
-                  child: AnimatedOpacity(
-                    opacity: _pointerPositions.isNotEmpty ? 0.0 : 0.07,
-                    duration: const Duration(milliseconds: 300),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(_selectionMode ? Icons.select_all : Icons.touch_app_outlined, size: 48, color: Colors.white),
-                        const SizedBox(height: 8),
-                        Text(_selectionMode ? 'SELECTION ACTIVE' : 'TRACKPAD', style: const TextStyle(letterSpacing: 6, fontWeight: FontWeight.w300, fontSize: 11, color: Colors.white)),
-                      ],
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: Opacity(
-                    opacity: 0.04,
-                    child: Container(
-                      width: 60,
-                      height: 40,
-                      decoration: BoxDecoration(color: Colors.blue, borderRadius: BorderRadius.circular(8)),
-                      child: const Center(child: Text('R', style: TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold))),
-                    ),
-                  ),
-                ),
+                ..._pointerPositions.values.map((pos) => Positioned(left: pos.dx - 80, top: pos.dy - 80, child: Container(width: 160, height: 160, decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [Colors.blue.withOpacity(0.18), Colors.blue.withOpacity(0.0)]))))),
+                Center(child: AnimatedOpacity(opacity: _pointerPositions.isNotEmpty ? 0.0 : 0.07, duration: const Duration(milliseconds: 300), child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(_selectionMode ? Icons.select_all : Icons.touch_app_outlined, size: 48, color: Colors.white), const SizedBox(height: 8), Text(_selectionMode ? 'SELECTION ACTIVE' : 'TRACKPAD', style: const TextStyle(letterSpacing: 6, fontWeight: FontWeight.w300, fontSize: 11, color: Colors.white))]))),
               ],
             ),
           ),
@@ -639,62 +505,26 @@ class _TrackpadControlState extends State<TrackpadControl> with TickerProviderSt
 
   Widget _buildRightPanel() {
     return Container(
-      width: 150,
-      padding: const EdgeInsets.only(top: 44, bottom: 20, left: 8, right: 16),
-      child: Column(
-        children: [
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                GestureDetector(
-                  onTap: () {
-                    _send({'type': 'zoom'});
-                    _showLabel('Mission Control');
-                  },
-                  child: Container(padding: const EdgeInsets.all(6), child: const Icon(Icons.control_camera, size: 16, color: Colors.white38)),
-                ),
-                const Text('SPEED', style: TextStyle(fontSize: 10, letterSpacing: 3, color: Colors.white38, fontWeight: FontWeight.w500)),
-                const SizedBox(height: 4),
-                Text('${_sensitivity.toStringAsFixed(1)}×', style: const TextStyle(color: Colors.blue, fontSize: 22, fontWeight: FontWeight.bold, fontFeatures: [FontFeature.tabularFigures()])),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: RotatedBox(
-                    quarterTurns: 3,
-                    child: SliderTheme(
-                      data: SliderThemeData(
-                        trackHeight: 2,
-                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-                        activeTrackColor: Colors.blue,
-                        inactiveTrackColor: Colors.white10,
-                        thumbColor: Colors.white,
-                        overlayColor: Colors.blue.withOpacity(0.15),
-                      ),
-                      child: Slider(value: _sensitivity, min: 0.5, max: 6.0, onChanged: (v) { setState(() => _sensitivity = v); _triggerSensitivityShow(); }),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-            ),
-          ),
-          const Divider(color: Colors.white10),
+      width: 150, padding: const EdgeInsets.only(top: 44, bottom: 20, left: 8, right: 16),
+      child: Column(children: [
+        Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          GestureDetector(onTap: () { _send({'type': 'zoom'}); _showLabel('Mission Control'); }, child: Container(padding: const EdgeInsets.all(6), child: const Icon(Icons.control_camera, size: 16, color: Colors.white38))),
+          const Text('SPEED', style: TextStyle(fontSize: 10, letterSpacing: 3, color: Colors.white38, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 4),
+          Text('${_sensitivity.toStringAsFixed(1)}×', style: const TextStyle(color: Colors.blue, fontSize: 22, fontWeight: FontWeight.bold, fontFeatures: [FontFeature.tabularFigures()])),
           const SizedBox(height: 12),
-          _buildCheatSheet(),
-        ],
-      ),
+          Expanded(child: RotatedBox(quarterTurns: 3, child: SliderTheme(data: SliderThemeData(trackHeight: 2, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8), overlayShape: const RoundSliderOverlayShape(overlayRadius: 14), activeTrackColor: Colors.blue, inactiveTrackColor: Colors.white10, thumbColor: Colors.white, overlayColor: Colors.blue.withOpacity(0.15)), child: Slider(value: _sensitivity, min: 0.5, max: 6.0, onChanged: (v) { setState(() => _sensitivity = v); _triggerSensitivityShow(); })))),
+          const SizedBox(height: 12),
+        ])),
+        const Divider(color: Colors.white10),
+        const SizedBox(height: 12),
+        _buildCheatSheet(),
+      ]),
     );
   }
 
   Widget _buildCheatSheet() {
     final items = [('1 finger', 'Move'), ('2 finger', 'Scroll'), ('2 tap', 'Right click'), ('3 swipe', 'Exposé'), ('4 swipe', 'Spaces')];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: items.map((item) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(children: [Text(item.$1, style: const TextStyle(fontSize: 9, color: Colors.white24)), const Spacer(), Text(item.$2, style: const TextStyle(fontSize: 9, color: Colors.white38))]),
-      )).toList(),
-    );
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: items.map((item) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Row(children: [Text(item.$1, style: const TextStyle(fontSize: 9, color: Colors.white24)), const Spacer(), Text(item.$2, style: const TextStyle(fontSize: 9, color: Colors.white38))]))).toList());
   }
 }

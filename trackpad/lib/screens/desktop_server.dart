@@ -22,43 +22,45 @@ class _DesktopServerState extends State<DesktopServer> {
   final List<Socket> _connectedClients = [];
   bool _androidUsbActive = false;
   bool _iosUsbActive = false;
+  bool _androidP2PActive = false;
+  bool _isServerRunning = false;
   Process? _iproxyProcess;
+  Process? _p2pProcess;
+
+  bool get _isActive => _isServerRunning || _androidP2PActive;
 
   @override
   void initState() {
     super.initState();
-    _fetchIp();
-    _startServer();
   }
-
-  List<String> _allIps = [];
 
   void _fetchIp() async {
     List<String> ips = [];
-    for (var interface in await NetworkInterface.list()) {
-      for (var addr in interface.addresses) {
-        if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-          // Prioritize 192.168.x.x or 10.x.x.x addresses (typical WiFi)
-          if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.')) {
-            ips.insert(0, addr.address);
-          } else {
-            ips.add(addr.address);
+    try {
+      for (var interface in await NetworkInterface.list()) {
+        for (var addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.')) {
+              ips.insert(0, addr.address);
+            } else {
+              ips.add(addr.address);
+            }
           }
         }
       }
+    } catch (e) {
+      _log("IP Fetch Error: $e");
     }
     setState(() {
-      _allIps = ips;
       _myIp = ips.isNotEmpty ? ips.join("\n") : "No IP Found";
     });
   }
 
   void _startServer() async {
+    _fetchIp();
     try {
-      // WiFi UDP Listener
+      _log("Starting network server...");
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 50005);
-      _log("WiFi (UDP) ready on 50005");
-
       _udpSocket!.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
           Datagram? dg = _udpSocket!.receive();
@@ -66,12 +68,9 @@ class _DesktopServerState extends State<DesktopServer> {
         }
       });
 
-      // USB/TCP Listener - Moved to 50010 to avoid conflict
       _tcpServer = await ServerSocket.bind(InternetAddress.anyIPv4, 50010);
-      _log("USB Tunnel (TCP) ready on 50010");
       _tcpServer!.listen(_onNewConnection);
 
-      // Discovery for WiFi
       _registration = await register(
         Service(
           name: 'MagicTrackpad-${Platform.localHostname}',
@@ -79,25 +78,89 @@ class _DesktopServerState extends State<DesktopServer> {
           port: 50005,
         ),
       );
+      
+      setState(() => _isServerRunning = true);
+      _log("Network Server Live (WiFi/USB TCP)");
     } catch (e) {
       _log("Server Error: $e");
+      _stopServer();
     }
+  }
+
+  Future<void> _setupAndroidP2P() async {
+    _log("Starting Android ADB P2P (No TCP)...");
+    try {
+      String adbPath = 'adb';
+      if (Platform.isWindows) {
+        final homeDir = Platform.environment['USERPROFILE'];
+        if (homeDir != null) {
+          final commonAdbPath = "$homeDir\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe";
+          if (await File(commonAdbPath).exists()) adbPath = commonAdbPath;
+        }
+      } else if (Platform.isMacOS) {
+        adbPath = await getAdbPath();
+      }
+
+      _p2pProcess?.kill();
+      // Clear logs first so we don't process old movements
+      await Process.run(adbPath, ['logcat', '-c']);
+      
+      // Listen specifically for the 'flutter' tag where print() output goes
+      _p2pProcess = await Process.start(adbPath, ['logcat', '-s', 'flutter']);
+      
+      setState(() {
+        _androidP2PActive = true;
+      });
+
+      _p2pProcess!.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+        // Look for our prefix 'TP:' inside the flutter log line
+        final tpIndex = line.indexOf('TP:');
+        if (tpIndex != -1) {
+          _processMessage(line.substring(tpIndex + 3));
+        }
+      }, onDone: () {
+        if (mounted) setState(() => _androidP2PActive = false);
+      }, onError: (e) => _log("P2P Error: $e"));
+      
+      _log("ADB P2P Active. Waiting for phone logs...");
+    } catch (e) {
+      _log("P2P Setup Failed: $e");
+    }
+  }
+
+  void _stopServer() async {
+    _log("Stopping all services...");
+    if (_registration != null) await unregister(_registration!);
+    _registration = null;
+    _udpSocket?.close();
+    _udpSocket = null;
+    _tcpServer?.close();
+    _tcpServer = null;
+    _iproxyProcess?.kill();
+    _iproxyProcess = null;
+    _p2pProcess?.kill();
+    _p2pProcess = null;
+    
+    for (var c in _connectedClients) { c.destroy(); }
+    _connectedClients.clear();
+    
+    setState(() {
+      _isServerRunning = false;
+      _androidUsbActive = false;
+      _iosUsbActive = false;
+      _androidP2PActive = false;
+    });
   }
 
   void _onNewConnection(Socket client) {
     setState(() => _connectedClients.add(client));
-    _log("Connected: ${client.remoteAddress.address}");
-    
     utf8.decoder.bind(client).transform(const LineSplitter()).listen(
       (line) => _processMessage(line),
-      onDone: () {
-        setState(() => _connectedClients.remove(client));
-        _log("Disconnected: ${client.remoteAddress.address}");
-      },
-      onError: (e) {
-        setState(() => _connectedClients.remove(client));
-        _log("Connection Error: $e");
-      },
+      onDone: () => setState(() => _connectedClients.remove(client)),
+      onError: (e) => setState(() => _connectedClients.remove(client)),
     );
   }
 
@@ -116,34 +179,24 @@ class _DesktopServerState extends State<DesktopServer> {
   Future<void> _setupAndroidUsb() async {
     try {
       String adbPath = 'adb';
-      
-      // Try to find ADB in common Windows locations if the simple command fails
       if (Platform.isWindows) {
         final homeDir = Platform.environment['USERPROFILE'];
         if (homeDir != null) {
           final commonAdbPath = "$homeDir\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe";
-          if (await File(commonAdbPath).exists()) {
-            adbPath = commonAdbPath;
-          }
+          if (await File(commonAdbPath).exists()) adbPath = commonAdbPath;
         }
+      } else if (Platform.isMacOS) {
+        adbPath = await getAdbPath();
       }
-
-      _log("Running ADB reverse...");
-      // Maps Device:50010 -> Mac/PC:50010
       final result = await Process.run(adbPath, ['reverse', 'tcp:50010', 'tcp:50010']);
-      
       if (result.exitCode == 0) {
         setState(() => _androidUsbActive = true);
         _log("Android USB: Port 50010 reversed");
       } else {
-        _log("ADB Error (Exit ${result.exitCode}): ${result.stderr}");
-        if (result.stderr.toString().contains("not found")) {
-          _log("Tip: Ensure ADB is in PATH or Android SDK is installed.");
-        }
+        _log("ADB Error: ${result.stderr}");
       }
     } catch (e) {
-      _log("ADB Process Error: $e");
-      _log("Make sure Android SDK Platform-Tools are installed.");
+      _log("ADB Error: $e");
     }
   }
 
@@ -184,33 +237,40 @@ class _DesktopServerState extends State<DesktopServer> {
     _log("iOS USB: Starting $iproxyPath...");
     try {
       _iproxyProcess?.kill();
-      
-      // Port 50011 (PC) -> Port 50010 (iPhone)
       _iproxyProcess = await Process.start(iproxyPath, ['50011', '50010']);
-      
       setState(() => _iosUsbActive = true);
       await Future.delayed(const Duration(seconds: 2));
-      
-      _log("Connecting to iOS tunnel (127.0.0.1:50011)...");
       final socket = await Socket.connect('127.0.0.1', 50011, timeout: const Duration(seconds: 5));
       _onNewConnection(socket);
       _log("iOS USB Tunnel established!");
-      
     } catch (e) {
       _log("iOS USB Failed: $e");
-      if (Platform.isWindows) {
-        _log("Tip: Ensure iproxy.exe is in PATH or C:\\libimobiledevice");
-      }
     }
+  }
+
+  Future<String> getAdbPath() async {
+    final home = Platform.environment['HOME'];
+
+    final candidates = [
+      'adb', // try PATH first
+      '$home/Library/Android/sdk/platform-tools/adb',
+      '/opt/homebrew/bin/adb',
+      '/usr/local/bin/adb',
+    ];
+
+    for (final path in candidates) {
+      try {
+        final result = await Process.run(path, ['version']);
+        if (result.exitCode == 0) return path;
+      } catch (_) {}
+    }
+
+    throw Exception('ADB not found');
   }
 
   @override
   void dispose() {
-    if (_registration != null) unregister(_registration!);
-    _udpSocket?.close();
-    _iproxyProcess?.kill();
-    for (var c in _connectedClients) { c.destroy(); }
-    _tcpServer?.close();
+    _stopServer();
     super.dispose();
   }
 
@@ -228,49 +288,13 @@ class _DesktopServerState extends State<DesktopServer> {
             const Text("TRACKPAD RECEIVER", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
             
             const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: _connectedClients.isEmpty ? Colors.grey.withOpacity(0.1) : Colors.green.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                _connectedClients.isEmpty ? "No Clients Connected" : "${_connectedClients.length} Client(s) Connected",
-                style: TextStyle(color: _connectedClients.isEmpty ? Colors.grey : Colors.green, fontSize: 12, fontWeight: FontWeight.bold),
-              ),
-            ),
+            _buildStatusHeader(),
 
-            const SizedBox(height: 20),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _buildStatusCard("WiFi IP", _myIp, Colors.blue),
-                const SizedBox(width: 12),
-                _buildStatusCard("Android USB", _androidUsbActive ? "Active" : "Ready", _androidUsbActive ? Colors.green : Colors.grey),
-                const SizedBox(width: 12),
-                _buildStatusCard("iOS USB", _iosUsbActive ? "Active" : "Ready", _iosUsbActive ? Colors.green : Colors.grey),
-              ],
-            ),
-            
             const SizedBox(height: 30),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: _setupAndroidUsb,
-                  icon: const Icon(Icons.android),
-                  label: const Text("Setup Android USB"),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green.withOpacity(0.1), foregroundColor: Colors.green),
-                ),
-                const SizedBox(width: 16),
-                ElevatedButton.icon(
-                  onPressed: _setupIosUsb,
-                  icon: const Icon(Icons.apple),
-                  label: const Text("Setup iOS USB"),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.white.withOpacity(0.05), foregroundColor: Colors.white70),
-                ),
-              ],
-            ),
+            if (!_isActive)
+              _buildStartButtons()
+            else
+              _buildControlPanel(),
 
             const SizedBox(height: 30),
             const SizedBox(width: 500, child: Divider(color: Colors.white10)),
@@ -288,6 +312,78 @@ class _DesktopServerState extends State<DesktopServer> {
     );
   }
 
+  Widget _buildStatusHeader() {
+    bool isLive = _isActive;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+        color: !isLive ? Colors.red.withOpacity(0.1) : Colors.green.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        !isLive ? "Offline" : (_androidP2PActive ? "ADB P2P Mode Active (No TCP)" : "${_connectedClients.length} Connected"),
+        style: TextStyle(color: !isLive ? Colors.redAccent : Colors.green, fontSize: 12, fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
+  Widget _buildStartButtons() {
+    return Column(
+      children: [
+        ElevatedButton.icon(
+          onPressed: _startServer,
+          icon: const Icon(Icons.network_check),
+          label: const Text("Start Network Server (WiFi/USB)", style: TextStyle(fontSize: 16)),
+          style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16), backgroundColor: Colors.blue.withOpacity(0.2), foregroundColor: Colors.blue),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton.icon(
+          onPressed: _setupAndroidP2P,
+          icon: const Icon(Icons.usb_off_rounded),
+          label: const Text("Start ADB P2P (No-TCP)", style: TextStyle(fontSize: 16)),
+          style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16), backgroundColor: Colors.orange.withOpacity(0.2), foregroundColor: Colors.orange),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildControlPanel() {
+    return Column(
+      children: [
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (_androidP2PActive)
+                _buildStatusCard("ADB P2P", "Log-based\nNo TCP", Colors.orange)
+              else ...[
+                _buildStatusCard("WiFi IP", _myIp, Colors.blue),
+                const SizedBox(width: 12),
+                _buildStatusCard("Android USB", _androidUsbActive ? "Active" : "Ready", Colors.green),
+                const SizedBox(width: 12),
+                _buildStatusCard("iOS USB", _iosUsbActive ? "Active" : "Ready", Colors.grey),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        if (!_androidP2PActive) ...[
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton.icon(onPressed: _setupAndroidUsb, icon: const Icon(Icons.android), label: const Text("ADB Reverse"), style: ElevatedButton.styleFrom(backgroundColor: Colors.green.withOpacity(0.1), foregroundColor: Colors.green)),
+              const SizedBox(width: 16),
+              ElevatedButton.icon(onPressed: _setupIosUsb, icon: const Icon(Icons.apple), label: const Text("iOS USB"), style: ElevatedButton.styleFrom(backgroundColor: Colors.white.withOpacity(0.05), foregroundColor: Colors.white70)),
+            ],
+          ),
+          const SizedBox(height: 20),
+        ],
+        TextButton.icon(onPressed: _stopServer, icon: const Icon(Icons.stop, size: 16), label: const Text("Stop All"), style: TextButton.styleFrom(foregroundColor: Colors.redAccent)),
+      ],
+    );
+  }
+
   Widget _buildStatusCard(String title, String value, Color color) {
     return Container(
       width: 160,
@@ -298,10 +394,11 @@ class _DesktopServerState extends State<DesktopServer> {
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Text(title, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Text(value, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontFamily: 'Courier')),
+          Text(value, textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, fontFamily: 'Courier')),
         ],
       ),
     );

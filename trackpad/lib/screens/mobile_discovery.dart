@@ -12,11 +12,13 @@ class MobileDiscovery extends StatefulWidget {
   State<MobileDiscovery> createState() => _MobileDiscoveryState();
 }
 
+enum ConnectionMode { wifi, usb, adbP2P }
+
 class _MobileDiscoveryState extends State<MobileDiscovery> {
   final TextEditingController _ipController = TextEditingController();
   Discovery? _discovery;
   List<Service> _discoveredServices = [];
-  bool _isUsbMode = false;
+  ConnectionMode _mode = ConnectionMode.wifi;
 
   @override
   void initState() {
@@ -26,7 +28,7 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
 
   Future<void> _init() async {
     await _loadSavedIp();
-    if (!_isUsbMode) {
+    if (_mode == ConnectionMode.wifi) {
       _startDiscovery();
     }
   }
@@ -35,7 +37,8 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
     final prefs = await SharedPreferences.getInstance();
     final savedIp = prefs.getString('last_ip');
     if (savedIp != null) setState(() => _ipController.text = savedIp);
-    setState(() => _isUsbMode = prefs.getBool('usb_mode') ?? false);
+    final modeIndex = prefs.getInt('connection_mode') ?? 0;
+    setState(() => _mode = ConnectionMode.values[modeIndex]);
   }
 
   Future<void> _startDiscovery() async {
@@ -61,9 +64,9 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
   }
 
   void _connect(BuildContext context, String ip) async {
-    if (ip.isEmpty) return;
+    if (_mode == ConnectionMode.wifi && ip.isEmpty) return;
 
-    if (!_isUsbMode) {
+    if (_mode == ConnectionMode.wifi) {
       try {
         InternetAddress(ip);
       } catch (_) {
@@ -81,13 +84,17 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('last_ip', ip);
-    await prefs.setBool('usb_mode', _isUsbMode);
+    await prefs.setInt('connection_mode', _mode.index);
     
     if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => TrackpadControl(ip: ip, isUsbMode: _isUsbMode),
+        builder: (context) => TrackpadControl(
+          ip: ip, 
+          isUsbMode: _mode == ConnectionMode.usb,
+          isP2PMode: _mode == ConnectionMode.adbP2P,
+        ),
       ),
     );
   }
@@ -116,22 +123,35 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
                     child: _buildModeButton(
                       title: "WiFi",
                       icon: Icons.wifi_rounded,
-                      selected: !_isUsbMode,
+                      selected: _mode == ConnectionMode.wifi,
                       onTap: () {
-                        setState(() => _isUsbMode = false);
+                        setState(() => _mode = ConnectionMode.wifi);
                         if (_discovery == null) _startDiscovery();
                       },
                     ),
                   ),
                   Expanded(
                     child: _buildModeButton(
-                      title: "Direct USB",
+                      title: "USB Tunnel",
                       icon: Icons.usb_rounded,
-                      selected: _isUsbMode,
+                      selected: _mode == ConnectionMode.usb,
                       onTap: () {
                         setState(() {
-                          _isUsbMode = true;
-                          _ipController.text = "localhost";
+                          _mode = ConnectionMode.usb;
+                          _ipController.text = "127.0.0.1";
+                        });
+                      },
+                    ),
+                  ),
+                  Expanded(
+                    child: _buildModeButton(
+                      title: "ADB P2P",
+                      icon: Icons.usb_off_rounded,
+                      selected: _mode == ConnectionMode.adbP2P,
+                      onTap: () {
+                        setState(() {
+                          _mode = ConnectionMode.adbP2P;
+                          _ipController.text = "P2P";
                         });
                       },
                     ),
@@ -141,21 +161,12 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
             ),
             const SizedBox(height: 30),
 
-            if (!_isUsbMode) ...[
+            if (_mode == ConnectionMode.wifi) ...[
               const Icon(Icons.wifi_rounded, size: 80, color: Colors.blue),
               const SizedBox(height: 10),
-              const Text(
-                "Looking for your device automatically...",
-                style: TextStyle(color: Colors.white70),
-              ),
+              const Text("Looking for devices automatically...", style: TextStyle(color: Colors.white70)),
               const SizedBox(height: 20),
               if (_discoveredServices.isNotEmpty) ...[
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text("Found Devices:",
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(height: 10),
                 ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
@@ -166,85 +177,42 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
                       leading: const Icon(Icons.laptop_mac, color: Colors.blue),
                       title: Text(s.name ?? "Unknown Device"),
                       subtitle: Text(s.host ?? ""),
-                      trailing: const Icon(Icons.chevron_right),
                       onTap: () => _connect(context, s.host!),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10)),
                       tileColor: Colors.white.withOpacity(0.05),
                     );
                   },
                 ),
                 const SizedBox(height: 20),
-                const Divider(),
-                const SizedBox(height: 20),
               ],
-              const Text(
-                "Or enter IP manually:",
-                style: TextStyle(fontSize: 14, color: Colors.white38),
-              ),
-              const SizedBox(height: 15),
               TextField(
                 controller: _ipController,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: "Host IP Address",
-                  hintText: "e.g. 192.168.1.5",
-                  prefixIcon: const Icon(Icons.computer),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(15)),
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.05),
-                ),
+                decoration: InputDecoration(labelText: "Manual IP", border: OutlineInputBorder(borderRadius: BorderRadius.circular(15))),
                 onSubmitted: (ip) => _connect(context, ip),
               ),
-            ] else ...[
+            ] else if (_mode == ConnectionMode.usb) ...[
               const Icon(Icons.usb_rounded, size: 80, color: Colors.green),
               const SizedBox(height: 10),
-              const Text(
-                "Direct USB Connection (No WiFi)",
-                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 18),
-              ),
+              const Text("USB Tunnel Mode (TCP via ADB/iproxy)", style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.green.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(15),
-                  border: Border.all(color: Colors.green.withOpacity(0.2)),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Setup Guide:",
-                      style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      "1. Connect phone to PC via USB cable\n"
-                      "2. Enable USB Debugging in phone developer settings\n"
-                      "3. On your Mac/PC, click the 'Setup Android USB' button\n"
-                      "4. Press connect below",
-                      style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.5),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 40),
+              _buildGuide("1. Connect USB cable\n2. Run 'ADB Reverse' or 'iproxy' on PC\n3. Press connect below"),
+            ] else ...[
+              const Icon(Icons.usb_off_rounded, size: 80, color: Colors.orange),
+              const SizedBox(height: 10),
+              const Text("ADB P2P Mode (No-TCP)", style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              _buildGuide("1. Connect USB cable\n2. Click 'Start ADB P2P' on PC app\n3. No network ports will be opened\n4. Perfect for bypassing virus protectors"),
             ],
             
-            const SizedBox(height: 20),
+            const SizedBox(height: 40),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: _isUsbMode ? Colors.green.withOpacity(0.8) : Colors.blue.withOpacity(0.8),
+                backgroundColor: _mode == ConnectionMode.adbP2P ? Colors.orange.withOpacity(0.8) : (_mode == ConnectionMode.usb ? Colors.green.withOpacity(0.8) : Colors.blue.withOpacity(0.8)),
                 foregroundColor: Colors.white,
                 minimumSize: const Size(double.infinity, 56),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
               ),
               onPressed: () => _connect(context, _ipController.text),
-              child: Text(_isUsbMode ? "Connect via USB Tunnel" : "Connect Manually",
-                  style: const TextStyle(fontSize: 18)),
+              child: Text("Connect / Start Control", style: const TextStyle(fontSize: 18)),
             ),
           ],
         ),
@@ -252,32 +220,27 @@ class _MobileDiscoveryState extends State<MobileDiscovery> {
     );
   }
 
-  Widget _buildModeButton({
-    required String title,
-    required IconData icon,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
+  Widget _buildGuide(String text) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(15)),
+      child: Text(text, style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.5)),
+    );
+  }
+
+  Widget _buildModeButton({required String title, required IconData icon, required bool selected, required VoidCallback onTap}) {
+    Color color = title.contains("USB") ? Colors.green : (title.contains("P2P") ? Colors.orange : Colors.blue);
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: selected ? (title.contains("USB") ? Colors.green.withOpacity(0.2) : Colors.blue.withOpacity(0.2)) : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
-        ),
+        decoration: BoxDecoration(color: selected ? color.withOpacity(0.2) : Colors.transparent, borderRadius: BorderRadius.circular(12)),
         child: Column(
           children: [
-            Icon(icon, color: selected ? (title.contains("USB") ? Colors.green : Colors.blue) : Colors.white38),
+            Icon(icon, color: selected ? color : Colors.white38),
             const SizedBox(height: 4),
-            Text(
-              title,
-              style: TextStyle(
-                color: selected ? Colors.white : Colors.white38,
-                fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
+            Text(title, style: TextStyle(color: selected ? Colors.white : Colors.white38, fontSize: 10, fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
           ],
         ),
       ),

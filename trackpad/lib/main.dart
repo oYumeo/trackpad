@@ -3,13 +3,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/mobile_discovery.dart';
 import 'screens/desktop_server.dart';
+import 'dart:ffi';
+import 'dart:io';
 
 void main() {
+  ignoreSigPipe();
   WidgetsFlutterBinding.ensureInitialized();
   // Set immersive mode for the whole app if desired, 
   // though TrackpadControl handles it specifically.
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const TrackpadApp());
+}
+
+void ignoreSigPipe() {
+  if (!Platform.isMacOS) return;
+
+  final dylib = DynamicLibrary.process();
+  final signal = dylib.lookupFunction<
+      Int32 Function(Int32, Pointer<Void>),
+      int Function(int, Pointer<Void>)
+  >('signal');
+
+  const SIGPIPE = 13;
+  final SIG_IGN = Pointer<Void>.fromAddress(1);
+
+  signal(SIGPIPE, SIG_IGN);
 }
 
 class TrackpadApp extends StatelessWidget {
@@ -32,6 +50,7 @@ class TrackpadApp extends StatelessWidget {
       home: const PlatformSwitch(),
     );
   }
+
 }
 
 class PlatformSwitch extends StatelessWidget {
