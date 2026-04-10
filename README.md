@@ -1,38 +1,39 @@
-# Trackpad P2P
+# Trackpad
 
-**Trackpad P2P** allows you to simulate a high-precision trackpad or touchpad experience by connecting your Android or iOS device to a Mac or Windows machine via USB. By leveraging low-level device protocols (ADB and libimobiledevice), this tool bypasses standard network limitations to ensure a lag-free, secure connection.
+**Trackpad** turns your Android or iOS device into a high-precision, low-latency touchpad for Mac or Windows. By leveraging low-level USB protocols (ADB and libimobiledevice), it bypasses standard network interference for a smooth, professional experience.
 
 ---
 
 ## 🚀 Features
-* **Cross-Platform Support:** Connect Android/iOS to macOS/Windows.
-* **Low Latency:** Uses USB-to-TCP tunneling instead of Wi-Fi to eliminate lag.
-* **Secure:** Data remains on the physical cable, bypassing standard network sniffers and aggressive antivirus monitoring.
+* **Cross-Platform:** Full support for Android/iOS connecting to macOS/Windows.
+* **USB P2P Mode:** Uses USB-to-TCP tunneling to eliminate lag and bypass aggressive antivirus monitoring (like Trend Micro).
+* **Wireless Mode:** Connect instantly over the same Wi-Fi network for maximum convenience.
+* **Secure:** Physical cable data remains local, invisible to network sniffers.
 
 ---
 
 ## 🛠 Prerequisites & Installation
 
 ### 1. iOS Connectivity (Windows)
-To bridge an iOS device to a Windows machine, you must install the native Apple drivers and the mobile device interface toolkit.
+To bridge iOS to Windows, you need the Apple driver stack and the mobile interface toolkit.
 
-1.  **Install iTunes:** Download and install the latest version of [iTunes](https://www.apple.com/itunes/) (this provides the necessary USB drivers).
+1.  **Install iTunes:** Download [iTunes](https://www.apple.com/itunes/) to ensure the correct USB drivers are active.
 2.  **Setup libimobiledevice:**
-    * Download the binary from [imobiledevice-net Releases](https://github.com/libimobiledevice-win32/imobiledevice-net/releases/tag/v1.3.17).
-    * Extract the files to `C:\libimobiledevice`.
-    * **Add to Environment Path:** * Search for "Edit the system environment variables" in Windows.
-        * Click **Environment Variables** > Select **Path** > **Edit** > **New**.
-        * Add `C:\libimobiledevice`.
+    * Download the binaries from [imobiledevice-net v1.3.17](https://github.com/libimobiledevice-win32/imobiledevice-net/releases/tag/v1.3.17).
+    * Extract to `C:\libimobiledevice`.
+3.  **Update Environment Path:**
+    * Search Windows for **"Edit the system environment variables"**.
+    * Click **Environment Variables** > Select **Path** > **Edit** > **New**.
+    * Add `C:\libimobiledevice`.
 
 ### 2. iOS Connectivity (macOS)
-macOS users can install the necessary libraries via Homebrew.
-
+Standard macOS users can install the toolkit via Homebrew:
 ```bash
 brew install libimobiledevice
 ```
 
 ### 3. Android Connectivity
-Ensure you have **Platform Tools (ADB)** installed on your system.
+Ensure **Platform Tools (ADB)** is available in your terminal path.
 * **macOS:** `brew install android-platform-tools`
 * **Windows:** Ensure `adb.exe` is in your System Path.
 
@@ -40,34 +41,39 @@ Ensure you have **Platform Tools (ADB)** installed on your system.
 
 ## 🔍 Connection Verification
 
-Before running the application, verify that your computer recognizes the mobile device over the USB interface.
+Before launching the app, verify the hardware handshake:
 
-### For iOS:
-Open your terminal/command prompt and run:
+### **For iOS**
+Run the following in your terminal:
 ```bash
 idevice_id -l
 ```
-*If a Unique Device ID (UDID) appears, the connection is successful.*
+*A successful connection will return your device's Unique Device ID (UDID).*
 
-### For Android:
+### **For Android**
+Run the following in your terminal:
 ```bash
 adb devices
 ```
-*Verify your device appears in the list and shows "device" (not "unauthorized").*
+*Verify your device is listed as `device`. If it says `unauthorized`, check your phone screen for the RSA prompt.*
 
 ---
 
 ## ⌨️ How to Use
 
-1.  **Connect Device:** Plug your phone into your computer via a high-quality USB cable.
-2.  **Start the Desktop Host:** Run the desktop application on your Mac or Windows machine.
-3.  **Launch Mobile App:** Open the Trackpad app on your Android or iOS device.
-4.  **Initialize Connection:**
-    * On Android, the app will automatically attempt an `adb reverse` tunnel on port **50010** (or use the Logcat P2P fallback).
-    * On iOS, ensure the "Trust this Computer" prompt has been accepted on the device.
+1.  **Physical Link:** Plug your phone into your computer via USB.
+2.  **Host Launch:** Open the **Trackpad Desktop Host** on your Mac or Windows.
+3.  **App Launch:** Open the **Trackpad App** on your mobile device.
+4.  **Establish Tunnel:**
+    * **Android:** The app automatically triggers `adb reverse tcp:50010 tcp:50010`. If blocked by security software, it will fail-over to **Logcat P2P Mode**.
+    * **iOS:** For Windows/Mac, run `iproxy 50010 50010` in the background to map the USB port to your local machine.
+    * **Wireless:** Simply ensure both devices are on the same SSID and select the host from the mobile app's discovery list.
 
 ---
 
 ## ⚠️ Troubleshooting
-* **Broken Pipe Error:** If using Windows, ensure Trend Micro or other Antivirus software is not blocking `adb.exe` or `iproxy.exe`.
-* **Device Not Found:** Try a different USB port (preferably directly into the motherboard/Mac) and ensure "USB Debugging" is on for Android.
+
+* **SocketException / Broken Pipe:** This usually means an antivirus (like Trend Micro) has severed the TCP tunnel. Try switching the Android connection to **Logcat P2P Mode** in the app settings.
+* **Device Not Found:** * **Android:** Ensure "USB Debugging" is enabled in Developer Options.
+    * **iOS:** Ensure you have clicked "Trust" on the "Trust this Computer?" popup on your iPhone/iPad.
+* **iproxy issues:** Ensure no other service is using port `50010` on your computer.
